@@ -1,0 +1,590 @@
+---
+title: |
+  <center> [EM1415] - Predictive Business and Finance </center>
+subtitle: | 
+  <center> The Tourism Forecasting 2010 Competition (JIF) </center>
+author: |
+  <div style="text-align: left; margin: 0 auto; width: fit-content;">
+    Crapanzano Edoardo – 889685
+  </div>
+date: | 
+  <center>`r Sys.Date()`</center>
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: show
+    self_contained: true
+    fig_caption: true
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# [Introduction]{style="font-size:20px;"}
+
+Tourism is one of the most rapidly growing global industries and tourism
+forecasting is becoming an increasingly important activity in planning
+and managing the industry. The 2010 tourism forecasting competition had
+two parts. In part I, competitors were tasked with producing forecasts
+for the next four years, given 518 series of annual tourism data. The
+data consists of 518 annual series, each related to some (undisclosed)
+tourism activity. Tourism activities include inbound tourism numbers to
+one country from another country, visitor nights in a particular
+country, tourism expenditure, etc. The series differ in length, ranging
+from 7-year series to 43-year series. They also differ in the order of
+magnitude of values. The data is available at
+www.kaggle.com/c/tourism1/Data. While the competition goal was to
+achieve the highest predictive accuracy, the goal of this case is to
+highlight different aspects of the forecasting process that pertain to
+forecasting a large number of series.
+
+## [Uploading Data]{style="font-size:20px;"}
+
+```{r tourism data, results = "hide"}
+tourism_data = read.csv("tourism_data.csv")
+```
+
+The packages used to create the codes are the following:
+
+```{r libraries, results = "hide"}
+if (!require("tidyverse")) install.packages("tidyverse") # Collection of data science packages
+if (!require("fpp3")) install.packages("fpp3")
+if (!require("visdat")) install.packages("visdat")
+
+library(tidyverse)
+library(fpp3)
+library(visdat)
+library(readr)
+library(dplyr)          # Data manipulation with verbs
+library(ggplot2)        # Create elegant data visualizations
+library(tidyr)          # Tidy and reshape data
+```
+
+# [Exercise 1]{style="font-size:20px;"}
+
+We need to create the 'Tsibble' object (Annual Time Series) and
+transform the data because they are in wide format (columns from Y1 to
+Y518). Thus, we need long format for fpp3. We also preserve the time
+alignment by adding a Time index before pivoting.
+
+```{r tsibble}
+tourism_ts = tourism_data %>%
+  mutate(Time = row_number()) %>%
+  pivot_longer(cols = starts_with("Y"), names_to = "Series", values_to = "Value") %>%
+  filter(!is.na(Value)) %>% # Removing NA values so that the data is clean and ready for the analysis
+  as_tsibble(index = Time, key = Series) # Convert to a tsibble (time series tibble)
+
+glimpse(tourism_ts)
+```
+
+<br>
+
+Based on the dataset of `tourism_data`, we can investigate the
+distribution of all the different Time Series or a random subset of
+them.
+
+**Advanced Visualization**: plotting 518 series on one legend is messy.
+So we can create a "Spaghetti Plot" by hiding the legend and using
+transparency, guaranteeing a clearer view.
+
+```{r plot all ts}
+tourism_ts %>%
+  autoplot(Value, alpha = 0.6) +
+  theme(legend.position = "none") +
+  labs(title = "Overview of all Tourism Series", subtitle = "518 series with varying lengths and trends", y = "Tourism metric", x = "Time Index")
+
+tourism_ts %>%
+  autoplot(sqrt(Value), alpha = 0.6) +
+  theme(legend.position = "none") +
+  labs(title = "Overview of all Tourism Series", subtitle = "518 series scaled by the square root", y = "Square root tourism metric", x = "Time Index")
+
+tourism_ts %>%
+  model(STL(Value)) %>%
+  components()%>%
+  autoplot() +
+  theme(legend.position = "none") +
+  labs(title = "Decomposition of all the Series", subtitle = "Top: data, Middle: trend, Bottom: remainder(noise+cycle)", y = "Tourism metric")
+
+tourism_ts %>%
+  model(STL(sqrt(Value))) %>%
+  components()%>%
+  autoplot() +
+  theme(legend.position = "none") +
+  labs(title = "Decomposition of all the Series", subtitle = "Top: square root data, Middle: trend, Bottom: remainder(noise+cycle)", y = "Square root tourism metric")
+```
+
+<br> The series have different starting points and they differ
+significantly in length and in magnitude (tourism activities with
+different scales). Type of components that are visible:<br> - *Trend*:
+this is the most dominant component across the series and the plot
+reveals that most series exhibit strong trends over time. Indeed, the
+tourism numbers follow economic expansion, leading to long-term upward
+(or occasionally downward) slopes;<br> - *Remainder*: random
+fluctuations are present but do not obscure the underlying trends in the
+majority of the larger series.<br>
+
+The *cyclical component* is not clearly visible since the remaining
+residuals resemble irregular noise rather than a smooth, wave-like
+cyclical pattern. With many series being very short (e.g., 7 to 15
+years), it is extremely difficult to statistically separate a multi-year
+cycle from the trend or random noise.<br> Clear *seasonal patterns* are
+difficult to distinguish from the trend for every series. The data
+represents annual figures, where seasonality is not applicable because
+it is impossible to see intra-year patterns such us quarterly, monthly
+or weekly patterns.<br> <br><br>
+
+**Detailed Visualization**: Facet Plot of a random subset of series to
+see components clearly, we plot a random sample of 12 series.
+
+```{r facets}
+set.seed(987)
+sample_series = sample(unique(tourism_ts$Series), 12)
+
+tourism_ts %>%
+  filter(Series %in% sample_series) %>%
+  autoplot(Value) +
+  facet_wrap(~Series, scales = "free_y") +
+  theme(legend.position = "none") +
+  labs(title = "Detailed view of 12 random Series", subtitle = "Notice the strong trends and differing scales", y = "Tourism metric")
+```
+
+<br>
+
+To investigate if the cyclical component is visible or not, we will use
+LOESS smoother (STL decomposition) which separates the Trend,
+Seasonality, and Remainder (Noise/Cycle). Since the data is annual
+(frequency = 1), standard seasonal decomposition doesn't apply
+automatically, so we use a local regression (LOESS) to separate the
+Trend from the Remainder. If the "Remainder" looks random, there is no
+cycle. If it looks like a wave, there is a cycle.
+
+```{r cyclical component}
+dcmp = tourism_ts %>%
+  filter(Series %in% sample_series)%>%
+  model(STL(Value ~ trend(window = 5), robust = TRUE)) %>% # trend controls wiggliness of trend component
+  components()
+
+dcmp %>%
+  autoplot() +
+  labs(title = "Decomposition of randomly selected Series", subtitle = "Top: data, Middle: trend, Bottom: remainder(noise+cycle)", y = "Tourism value")
+```
+
+<br> Since most of the series are short, decomposition algorithms tend
+to absorb any long-term movement into the trend component. We have
+applied a small window (e.g., window = 5) so that the model only looks
+at 5 time steps in order to react quickly to changes and bend to follow
+the data more closely. When we mathematically remove the trend
+(detrending), the remaining "residuals" mostly resemble irregular noise
+rather than a smooth, wave-like cyclical pattern. Most series exhibit a
+strong, monotonic upward: this overpowering movement makes it difficult
+to see the "business cycle" (the rise and fall of tourism demand due to
+economic conditions for non-fixed period of at least 2 years). Thus, the
+cyclical component is not clearly visible. <br><br>
+
+Then, we need to check for internal missing values through `scan_gaps()`
+that searches if there are missing time steps within the series range.
+
+```{r check NA and errors}
+#Missing values
+gaps = scan_gaps(tourism_ts)
+
+if(nrow(gaps) > 0) {
+  print("Warning: Internal missing values found!")
+  print(gaps)
+} else {
+  print("Check passed: No internal missing values found.")
+}
+
+#Zero values
+total_zeros = sum(tourism_data == 0, na.rm = TRUE)
+
+if (total_zeros > 0) {
+  print(paste("ALERT: Found", total_zeros, "zero values."))
+} else {
+  print("Clean: No zero values found in the dataset.")
+}
+
+#Negative values
+total_negatives = sum(tourism_data < 0, na.rm = TRUE)
+
+if (total_negatives > 0) {
+  print(paste("ALERT: Found", total_negatives, "negative values."))
+} else {
+  print("Clean: No negative values found.")
+}
+```
+
+There are no internal missing values (gaps in the middle of a series).
+The NA values observed in the dataset are solely due to the differing
+lengths and starting points of the series. There are no zero values and
+no negative values, which is consistent with tourism flow data. The data
+appears clean, though the short duration of some series (e.g., 7
+points/years) limits the complexity of models that can be fitted to
+them. <br>
+
+```{r plot NA}
+vis_miss(tourism_data) +
+  labs(title = "Time Series Structure Map",
+       subtitle = "Black areas indicate missing values/not yet started series (varying lengths)",
+       x = 'Time Series', y = "Years (Time Index)")+
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), panel.grid = element_blank(), legend.position = "bottom")
+```
+
+<br> This plot clearly shows the "stepped" structure of the dataset:
+black areas indicate years where the series had not started yet. It does
+not mean that tourism was zero in those years; it simply means the data
+was not recorded. <br>
+
+# [Exercise 2]{style="font-size:20px;"}
+
+```{r sets}
+# Create Training Set (Remove the last 4 years)
+n_years = nrow(tourism_data)
+train_set = tourism_data[1:(n_years - 4), ]
+
+# Create Validation Set (Keep only the last 4 years)
+validation_set = tourism_data[(n_years - 3):n_years, ]
+
+# Verify the split
+cat("Training Years:", nrow(train_set), "\n") # Should be 39
+cat("Validation Years:", nrow(validation_set), "\n") # Should be 4
+
+#alternative solution using the cleaned dataset in the long format
+train_tourism_ts = tourism_ts%>% #training set
+  filter(Time <= max(Time) - 4)
+
+test_tourism_ts = tourism_ts%>% #test set
+  filter(Time > max(Time) - 4)
+```
+
+The logic is *Out-of-Sample Evaluation*: when forecasting, we are always
+standing in the present trying to predict the unknown future. By hiding
+the last 4 years from the model during training, we simulate this
+reality by asking the model: "If you were standing 4 years ago, could
+you have accurately predicted what actually happened?"<br> For yearly
+data, a 4-year horizon represents a medium-term forecast. This partition
+specifically tests if our model captures the underlying trend stability
+rather than just short-term noise.
+
+The main disadvantage is Information Loss, which is particularly acute
+with yearly data:<br> -the most valuable data for forecasting next year
+is usually this year's data. By cutting off the last 4 years, we are
+forcing the model to forecast based on data that is already 4 years old.
+If a major structural change (e.g., a new travel policy or economic
+shift) occurred in the last 3 years, the model will be completely
+unaware of it and likely produce poor forecasts.<br> -In our dataset
+`tourism_data` we have time series of different length; removing 4
+observations is disproportionately harmful to shorter series. For a
+series with only 7 observations, this approach leaves only 3 data points
+for training (a 57% data loss), rendering statistical estimation of
+trends or parameters extremely unstable. In time series analysis, every
+data point counts; reducing the training data to a range of 39-3
+observations might make it harder for the model to statistically
+distinguish between a real trend and random variation. This leaves the
+model with very little "training" data to learn from, potentially
+leading to underfitting. <br>
+
+# [Exercise 3]{style="font-size:20px;"}
+
+```{r naive forecasts}
+# Last observation of the training set
+last_observation = tail(train_set, 1)
+
+# Generate the forecasts by simply repeating that last row 4 times, one for each horizon (h=1, 2, 3, 4)
+naive_forecasts = last_observation[rep(1, 4), ]
+rownames(naive_forecasts) = c("Horizon_1", "Horizon_2", "Horizon_3", "Horizon_4")
+
+naive_forecasts
+
+# Alternative solution
+naive_fit = train_tourism_ts%>%
+  model(Naive = NAIVE(Value))
+augment(naive_fit)
+
+naive_fc = naive_fit%>%
+  forecast(h = 4)
+print(naive_fc, width = Inf)
+```
+
+# [Exercise 4]{style="font-size:20px;"}
+
+If we must choose from the list provided (MAE, Average error, MAPE and
+RMSE), MAPE is the only suitable measure for combining results across
+these 518 series because it normalizes the errors, preventing the
+large-volume tourism destinations from skewing the overall performance
+assessment. Indeed, we must choose a metric that is scale-independent.
+Mean Absolute Percentage Error is suitable because calculates the error
+as a percentage of the actual value; this makes it scale-independent. It
+only works if the data contains no zeros values and as we have checked
+before in our dataset there are no zeros, so MAPE is a valid and strong
+measure of forecast accuracy.
+
+# [Exercise 5]{style="font-size:20px;"}
+
+```{r MAPE}
+# MAPE of the naive forecasts for training set (In-sample accuracy)
+MAPE_train = accuracy(naive_fit)%>%
+  select(Series, .type, .model, MAPE)
+MAPE_train
+
+# MAPE of the naive forecasts for validation set Out-of-sample accuracy
+MAPE_test = accuracy(naive_fc, tourism_ts)%>% # Compare forecasts vs actual values in the full dataset
+  select(Series, .type, .model, MAPE)
+MAPE_test
+```
+
+# [Exercise 6]{style="font-size:20px;"}
+
+```{r MASE}
+# MASE of the naive forecasts for training set (In-sample accuracy)
+MASE_train = accuracy(naive_fit)%>%
+  select(Series, .type, .model, MASE)
+MASE_train
+
+# MASE of the naive forecasts for validation set (Out-of-sample accuracy)
+MASE_test = accuracy(naive_fc, tourism_ts)%>% # Compare forecasts vs actual values in the full dataset
+  select(Series, .type, .model, MASE)
+MASE_test
+```
+
+The performance measure *Mean Absolute Scaled Error*(MASE) is widely
+considered one of the best metrics for comparing forecast accuracy
+across multiple time series. Like MAPE, MASE is independent of the scale
+of the data. Unlike MAPE, which becomes infinite or undefined if an
+observation is 0, MASE works perfectly fine with zero values in the time
+series (as long as the series isn't completely constant). It penalizes
+positive and negative errors equally and it has a very clear
+benchmark:<br> - MASE \< 1: the model is better than the in-sample Naive
+forecast;<br> - MASE \> 1: the model is worse than the in-sample Naive
+forecast;<br> - MASE = 1: the model performs effectively the same as a
+Naive forecast.
+
+# [Exercise 7]{style="font-size:20px;"}
+
+```{r MAPE scatterplot}
+data_MAPE = left_join(MAPE_train, MAPE_test, by = 'Series')
+data_MAPE
+
+plot_MAPE = ggplot(data_MAPE, aes(x = MAPE.x, y = MAPE.y)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, col = "red", linetype = "dashed") +
+  labs(title = "MAPE Scatterplot: Training vs Validation", x = "Training MAPE (%)", 
+       y = "Validation MAPE (%)") +
+  theme_minimal()
+print(plot_MAPE)
+```
+
+<br> In the MAPE scatterplot, most points lie above the red dashed line
+(bisector of the first and third quadrants) and this means the error in
+the validation period (last 4 years) is generally higher than in the
+training period. There seems to be a moderate positive correlation in
+MAPE which means series that were "hard" to forecast in the past (high
+Training MAPE) tended to remain "hard" to forecast in the future (high
+Validation MAPE), though the relationship is noisy.
+
+```{r MASE scatterplot}
+data_MASE = left_join(MASE_train, MASE_test, by = 'Series')
+data_MASE
+
+plot_MASE = ggplot(data_MASE, aes(x = MASE.x, y = MASE.y)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, col = "blue", linetype = "dashed") +
+  labs(title = "MASE Scatterplot: Training vs Validation", x = "Training MASE", 
+       y = "Validation MASE") +
+  theme_minimal()
+print(plot_MASE)
+```
+
+<br> The MASE scatterplot is a vertical line at x = 1.0 because for a
+Naive forecast the "Training MASE" is mathematically defined as exactly
+1: while the denominator of MASE is the error of the naive method
+in-sample, the numerator is also the error of the naive method
+in-sample, thus the ratio is always 1. This tells us that the "Training
+MASE" is not a useful metric for comparing the variability of series
+when using the Naive method itself. It only serves as the baseline.
+Furthermore it seems that the validation period contains more volatility
+or a structural break compared to training period.
+
+Performance ranges widely across series: there is high variance due to
+the enormous variation between series. Regarding MAPE scatterplot, some
+series are very stable (errors \< 5%), while others are extremely
+erratic (errors \> 100%). On the other hand, in MASE scatterplot the
+values range from roughly 0 (series that became much easier to forecast)
+to over 40 (series that completely broke from their historical pattern
+and they are harder to forecast).
+
+# [Exercise 8]{style="font-size:20px;"}
+
+The competition winner, Lee Baker, used an ensemble of three
+methods:<br> - Naive forecasts multiplied by a constant trend
+(global/local trend: ”globally tourism has grown ”at a rate of 6%
+annually.”);<br> - Linear regression;<br> - Exponentially-weighted
+linear regression.
+
+## [Letter a]{style="font-size:20px;"}
+
+Exact formula used for generating the first method is
+$F_{t+k} = y_t \times (1.06)^k$ where:<br> - $F_{t+k}$ is the forecast
+for k years ahead; <br> - $y_t$ is the last observed value in the
+training set (the Naive component);<br> - $1.06$ represents the 6%
+annual growth rate mentioned in the text (derived from the domain
+knowledge that "globally tourism has grown at a rate of 6%
+annually");<br> - $k$ is the forecast horizon (number of years into the
+future).<br>
+
+## [Letter b]{style="font-size:20px;"}
+
+While standard Naive forecasting assumes the future will be identical to
+the last observation ($F_{t+k} = y_t$), this "Naive with Trend" method
+assumes that the last observation is the baseline, but the series will
+continue to grow exponentially at a constant global rate of 6% per year.
+Standard Naive forecasts assume a random walk (today is the best
+predictor of tomorrow) and this works well for stock prices, which can
+go up or down with equal probability. However, tourism data often
+follows a Geometric Random Walk with Drift because tourism is rarely a
+stationary process. Indeed, over the last several decades, it has been a
+growth industry and international tourism arrivals have historically
+grown as global GDP rises and the middle class expands, disposable
+income for travel increases.
+
+## [Letter c]{style="font-size:20px;"}
+
+The model equation for this data could be
+$Y_t = \beta_0 + \beta_1 t + \epsilon_t$, where:<br> - $Y_t$ is the
+tourism metric (e.g., inbound tourism numbers) at time $t$;<br> - $t$ is
+the time index and in a univariate setting without external data (like
+GDP or prices), we use "Time" as a proxy for all the factors that cause
+tourism to grow over the long term;<br> - $\beta_0$ is the intercept to
+the y-axis (the theoretical baseline level of tourism at time 0);<br> -
+$\beta_1$ is the marginal effect which represents the average annual
+increase (or decrease) in tourism metric due to one unit increase of the
+independent variable, keeping fixed all the other variables;<br> -
+$\epsilon_t$ is the error term (residuals). For forecasting purposes, we
+require that residuals have zero mean and are uncorrelated between them
+and also with the predictors.<br>
+
+Autoregressive model (AR) could be an alternative solution. In this
+approach, we can use multiple regression with the past values of the
+variable to predict the current value:
+$y_t = \beta_0 + \beta_1 y_{t-1} + \beta_2 y_{t-2} + \dots + \epsilon_t$,
+where predictors are the lagged values of $y_t$ and the dependent
+variable is the current tourism demand. Although this method is correct,
+applying it to our `tourism_data` is risky for two reasons:<br> - our
+data has a strong upward trend in most of the series and AR model often
+struggle with non-stationary data that grows over time;<br> - every time
+we add a lag, we lose an observation from the start of our training set.
+It works great for the longer series, but it will fail completely for
+the shorter series because the creation of lag variables consumes the
+few data points we have in the training set.
+
+For these reasons the Simple Linear Regression is more robust for short,
+trended series because it doesn't require "lagging" (and thus losing)
+the early data points.
+
+## [Letter d]{style="font-size:20px;"}
+
+```{r linear regression}
+# We filter for only the first 5 series on the long tsibble 
+subset_data = tourism_ts %>%
+  filter(Series %in% c("Y1", "Y2", "Y3", "Y4", "Y5"))
+
+# Training set: all data except the last 4 years
+train_subset = subset_data %>%
+  filter(Time <= max(Time) - 4)
+
+# we fit the Linear Regression Model (TSLM) on training set
+fit_subset = train_subset %>%
+  model(lm = TSLM(Value ~ Time))
+report(fit_subset)
+
+# We forecast the next 4 years (validation period)
+fc_subset = fit_subset %>%
+  forecast(h = 4)
+print(fc_subset, width = Inf)
+
+# We compare the forecasts against the actual values in the full dataset
+accuracy_results = accuracy(fc_subset, subset_data) %>%
+  select(Series, .model, .type, RMSE, MAE, MAPE, MASE)
+accuracy_results
+```
+
+## [Letter e]{style="font-size:20px;"}
+
+Using high-order polynomials (e.g, 5th order) to forecast time series is
+dangerous because of their behavior outside the training set.
+Polynomials of order $k > 1$ tend to explode towards $+\infty$ or
+$-\infty$ very rapidly as you move away from the range of our data
+(extrapolation). A 5th-order polynomial might wiggle to fit every bump
+perfectly. However, for the next 4 years (forecast horizon), the curve
+might shoot vertically upwards or crash to negative values, producing
+absurd forecasts due to overfitting. This phenomenon often occurs with
+too complex models or insufficient datasets, performing excellently on
+training data but poorly at making predictions on novel data, leading to
+poor generalization ability and making the model unreliable.
+
+Using $R^2$ for blending the results essentially rewards overfitting. In
+trended time series, $R^2$ is often artificially high (e.g., $R^2$ \>
+0.90) simply because there is a trend and it doesn't punish
+autocorrelation in the residuals. A model can have $R^2 = 0.99$ and
+still produce biased, poor forecasts because it ignores the serial
+dependence of the errors. Relying on it for blending the results of the
+prediction, gives a false sense of confidence in the model.
+
+## [Letter f]{style="font-size:20px;"}
+
+If we were to consider exponential smoothing, the types that are
+reasonable candidates:<br> - Holt's linear trend (A, A, N);<br> - Damped
+trend method (A, Ad, N);<br> - previous models with multiplicative error
+that are ETS(M, A, N) and ETS(M, Ad, N).
+
+## [Letter g]{style="font-size:20px;"}
+
+Feature-based FORecast Model Averaging (FFORMA), developed by Monash
+University researchers, is a really effective approach which leads to
+easier automation of the ensemble step. We start with extracting
+features for every time series, calculating the main
+characteristics(e.g., using feasts in R). Then, we need to use a machine
+learning model like XGBoost that builds decision trees sequentially,
+where each tree corrects the errors of the previous one. This focuses
+heavily on reducing bias and it can directly optimize complex custom
+loss functions (like the forecasting error minimization). The inputs are
+the features of the series, while the outputs are the optimal weights
+for the base models. The meta-learner adapts to each specific series
+automatically and we have 518 custom ensembles generated by the
+algorithm.<br> Also we could use another machine learning model like
+Random Forest that leverages two forms of randomness to achieve low
+variance and low bias; it is based on bootstrap aggregating (bagging) to
+improve the accuracy of individual trees, and on random input selection
+during node splitting to further enhance diversity.
+
+## [Letter h]{style="font-size:20px;"}
+
+In a real-life tourism forecasting scenario we may have different
+weighting because high-volume/high-value series should matter more than
+other series. The cost of erratic forecasting is higher, thus
+under-forecasting might mean lost revenue (opportunity costs), while
+over-forecasting might mean wasted budget.The competition focused on
+minimizing the average MAPE of the next four values across all 518
+series, while in a real-life tourism forecasting scenario MAE or RMSE
+are often useful because they are scale dependent and consider the
+physical number of people (e.g., seats on planes, visitor nights or
+inbound tourism number to one country from another country) that matters
+more than the percentage.<br> In the forecasting process the steps that
+would likely be different:<br> - building a hierarchy where we could
+forecast "Total Country" first, then break it down by Region, then by
+City; we would ensure that the sum of the regional forecasts equals the
+national forecast. This ensures consistency for decision-makers at
+different levels;<br> - including explanatory variables that affect
+tourism such as GDP of origin countries, exchange rates, marketing spend
+or special events organized in the country;<br> - preferring a simpler
+and more interpretable model (like Simple Linear Regression) because
+stakeholders need to understand why the forecast is going up or down.
